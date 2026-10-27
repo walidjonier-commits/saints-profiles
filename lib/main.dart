@@ -240,12 +240,14 @@ final store = Store();
 class Local extends ChangeNotifier {
   Map<String, String> reacts = {};
   Set<String> likedComments = {};
+  String commentAs = 'me';
 
   Future<void> load() async {
     try {
       final sp = await SharedPreferences.getInstance();
       reacts = Map<String, String>.from(jsonDecode(sp.getString('reacts') ?? '{}'));
       likedComments = (sp.getStringList('cl') ?? []).toSet();
+      commentAs = sp.getString('as') ?? 'me';
     } catch (_) {}
     notifyListeners();
   }
@@ -255,6 +257,15 @@ class Local extends ChangeNotifier {
       final sp = await SharedPreferences.getInstance();
       await sp.setString('reacts', jsonEncode(reacts));
       await sp.setStringList('cl', likedComments.toList());
+    } catch (_) {}
+  }
+
+  Future<void> setCommentAs(String id) async {
+    commentAs = id;
+    notifyListeners();
+    try {
+      final sp = await SharedPreferences.getInstance();
+      await sp.setString('as', id);
     } catch (_) {}
   }
 
@@ -1031,7 +1042,6 @@ class PostCard extends StatefulWidget {
 
 class _PostCardState extends State<PostCard> {
   bool open = false;
-  String as = 'me';
   final ctl = TextEditingController();
 
   Post get post => widget.post;
@@ -1075,7 +1085,7 @@ class _PostCardState extends State<PostCard> {
   void send() {
     final t = ctl.text.trim();
     if (t.isEmpty) return;
-    final who = as == 'me' ? null : store.byId(as);
+    final who = local.commentAs == 'me' ? null : store.byId(local.commentAs);
     ref.collection('comments').add({
       'authorId': who?.id ?? 'me',
       'authorName': who?.name ?? 'Guest',
@@ -1281,47 +1291,58 @@ class _PostCardState extends State<PostCard> {
     );
   }
 
-  Widget commentInput() {
-    final who = as == 'me' ? null : store.byId(as);
-    return Row(children: [
-      PopupMenuButton<String>(
-        tooltip: 'Comment as',
-        onSelected: (v) => setState(() => as = v),
-        itemBuilder: (_) => [
-          const PopupMenuItem(
-              value: 'me',
-              child: Row(children: [Avatar(null, 14), SizedBox(width: 8), Text('Guest')])),
-          for (final q in store.profiles)
-            PopupMenuItem(
-              value: q.id,
-              child: Row(children: [
-                Avatar(q.photo, 14),
-                const SizedBox(width: 8),
-                Flexible(child: Text(q.name, overflow: TextOverflow.ellipsis)),
-              ]),
-            ),
-        ],
-        child: Avatar(who?.photo, 17),
+    Widget commentInput() {
+    final who = local.commentAs == 'me' ? null : store.byId(local.commentAs);
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Padding(
+        padding: const EdgeInsets.only(left: 4, bottom: 6),
+        child: Text('Commenting as ${who?.name ?? 'Guest'} · tap the picture to change',
+            style: const TextStyle(color: Colors.black54, fontSize: 12)),
       ),
-      const SizedBox(width: 8),
-      Expanded(
-        child: TextField(
-          controller: ctl,
-          onChanged: (_) => setState(() {}),
-          onSubmitted: (_) => send(),
-          textDirection: dirOf(ctl.text),
-          decoration: InputDecoration(
-            hintText: 'Write a comment…',
-            isDense: true,
-            filled: true,
-            fillColor: chipGrey,
-            contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none),
+      Row(children: [
+        PopupMenuButton<String>(
+          tooltip: 'Comment as',
+          onSelected: (v) => local.setCommentAs(v),
+          itemBuilder: (_) => [
+            const PopupMenuItem(
+                value: 'me',
+                child: Row(children: [Avatar(null, 14), SizedBox(width: 8), Text('Guest')])),
+            for (final q in store.profiles)
+              PopupMenuItem(
+                value: q.id,
+                child: Row(children: [
+                  Avatar(q.photo, 14),
+                  const SizedBox(width: 8),
+                  Flexible(child: Text(q.name, overflow: TextOverflow.ellipsis)),
+                ]),
+              ),
+          ],
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Avatar(who?.photo, 17),
+            const Icon(Icons.arrow_drop_down, color: Colors.black54),
+          ]),
+        ),
+        const SizedBox(width: 4),
+        Expanded(
+          child: TextField(
+            controller: ctl,
+            onChanged: (_) => setState(() {}),
+            onSubmitted: (_) => send(),
+            textDirection: dirOf(ctl.text),
+            decoration: InputDecoration(
+              hintText: 'Write a comment…',
+              isDense: true,
+              filled: true,
+              fillColor: chipGrey,
+              contentPadding:
+                  const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(20),
+                  borderSide: BorderSide.none),
+            ),
           ),
         ),
-      ),
-      IconButton(onPressed: send, icon: const Icon(Icons.send, color: fbBlue)),
+        IconButton(onPressed: send, icon: const Icon(Icons.send, color: fbBlue)),
+      ]),
     ]);
   }
-}
