@@ -312,6 +312,7 @@ void main() async {
     return;
   }
   await Firebase.initializeApp(options: firebaseOptions);
+  FirebaseFirestore.instance.settings = const Settings(persistenceEnabled: true);
   await local.load();
   store.start();
   runApp(const App());
