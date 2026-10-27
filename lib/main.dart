@@ -3,6 +3,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:image/image.dart' as img_lib;
+import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 const firebaseOptions = FirebaseOptions(
@@ -51,15 +52,25 @@ void toast(String m) =>
     messengerKey.currentState?.showSnackBar(SnackBar(content: Text(m)));
 
 Future<String?> pickImage({double maxWidth = 800}) async {
-  final f = await ImagePicker().pickImage(
-      source: ImageSource.gallery, maxWidth: maxWidth, imageQuality: 60);
+  final f = await ImagePicker().pickImage(source: ImageSource.gallery);
   if (f == null) return null;
-  final b = base64Encode(await f.readAsBytes());
-  if (b.length > 450000) {
-    toast('That photo is too large. Choose a smaller one.');
+  final raw = img_lib.decodeImage(await f.readAsBytes());
+  if (raw == null) {
+    toast('Could not read that image.');
     return null;
   }
-  return b;
+  final decoded = img_lib.bakeOrientation(raw);
+  var w = maxWidth.toInt();
+  var q = 70;
+  while (true) {
+    final small = decoded.width > w
+        ? img_lib.copyResize(decoded, width: w)
+        : decoded;
+    final out = base64Encode(img_lib.encodeJpg(small, quality: q));
+    if (out.length <= 450000 || w <= 200) return out;
+    w = (w * 0.8).round();
+    if (q > 40) q -= 10;
+  }
 }
 
 final _imgCache = <String, MemoryImage>{};
