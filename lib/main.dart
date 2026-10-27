@@ -1,9 +1,20 @@
 import 'dart:convert';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-const fbBlue = Color(0xFF1877F2);
+const firebaseOptions = FirebaseOptions(
+  apiKey: 'AIzaSyCH1fe4r5CRJqh-01SI6f_oKMqjv30WokE',
+  authDomain: 'jonier-101b4.firebaseapp.com',
+  projectId: 'jonier-101b4',
+  storageBucket: 'jonier-101b4.firebasestorage.app',
+  messagingSenderId: '820455654193',
+  appId: '1:820455654193:web:2f49a2c54cba0d3735e610',
+);
+  
+  const fbBlue = Color(0xFF1877F2);
 const pageBg = Color(0xFFF0F2F5);
 const chipGrey = Color(0xFFE4E6EB);
 const emojis = {
@@ -18,28 +29,41 @@ const emojis = {
 
 // ───────────────────────── helpers ─────────────────────────
 
-String uid() => DateTime.now().microsecondsSinceEpoch.toString();
+FirebaseFirestore get db => FirebaseFirestore.instance;
+CollectionReference<Map<String, dynamic>> get profilesCol =>
+    db.collection('profiles');
+
+int nowMs() => DateTime.now().millisecondsSinceEpoch;
 
 TextDirection dirOf(String s) =>
     RegExp(r'[\u0600-\u06FF]').hasMatch(s) ? TextDirection.rtl : TextDirection.ltr;
 
-String ago(String iso) {
-  final d = DateTime.now().difference(DateTime.parse(iso));
+String ago(int ms) {
+  final d = DateTime.now().difference(DateTime.fromMillisecondsSinceEpoch(ms));
   if (d.inMinutes < 1) return 'Just now';
   if (d.inMinutes < 60) return '${d.inMinutes}m';
   if (d.inHours < 24) return '${d.inHours}h';
   return '${d.inDays}d';
 }
 
+final messengerKey = GlobalKey<ScaffoldMessengerState>();
+void toast(String m) =>
+    messengerKey.currentState?.showSnackBar(SnackBar(content: Text(m)));
+
 Future<String?> pickImage({double maxWidth = 800}) async {
   final f = await ImagePicker().pickImage(
-      source: ImageSource.gallery, maxWidth: maxWidth, imageQuality: 70);
+      source: ImageSource.gallery, maxWidth: maxWidth, imageQuality: 60);
   if (f == null) return null;
-  return base64Encode(await f.readAsBytes());
+  final b = base64Encode(await f.readAsBytes());
+  if (b.length > 450000) {
+    toast('That photo is too large. Choose a smaller one.');
+    return null;
+  }
+  return b;
 }
 
 final _imgCache = <String, MemoryImage>{};
-MemoryImage? img(String? b) => b == null
+MemoryImage? img(String? b) => (b == null || b.isEmpty)
     ? null
     : _imgCache.putIfAbsent(b, () => MemoryImage(base64Decode(b)));
 
@@ -77,140 +101,119 @@ class Avatar extends StatelessWidget {
         radius: r,
         backgroundColor: const Color(0xFFCED0D4),
         backgroundImage: img(photo),
-        child: photo == null ? Icon(Icons.person, size: r, color: Colors.white) : null,
+        child: (photo == null || photo!.isEmpty)
+            ? Icon(Icons.person, size: r, color: Colors.white)
+            : null,
       );
 }
 
 // ───────────────────────── models ─────────────────────────
 
+class Profile {
+  final String id, name, subtitle, intro;
+  final String? photo, cover;
+  final List<String> followers;
+  final bool liked, following;
+  Profile({
+    required this.id,
+    required this.name,
+    required this.subtitle,
+    required this.intro,
+    required this.photo,
+    required this.cover,
+    required this.followers,
+    required this.liked,
+    required this.following,
+  });
+  factory Profile.fromDoc(DocumentSnapshot<Map<String, dynamic>> d) {
+    final j = d.data() ?? {};
+    return Profile(
+      id: d.id,
+      name: j['name'] ?? '',
+      subtitle: j['subtitle'] ?? '',
+      intro: j['intro'] ?? '',
+      photo: j['photo'],
+      cover: j['cover'],
+      followers: List<String>.from(j['followers'] ?? []),
+      liked: j['liked'] ?? true,
+      following: j['following'] ?? true,
+    );
+  }
+}
+
+class Post {
+  final String id, text;
+  final String? image;
+  final int created, shares, commentCount;
+  final Map<String, int> reactions;
+  Post({
+    required this.id,
+    required this.text,
+    required this.image,
+    required this.created,
+    required this.shares,
+    required this.commentCount,
+    required this.reactions,
+  });
+  factory Post.fromDoc(QueryDocumentSnapshot<Map<String, dynamic>> d) {
+    final j = d.data();
+    final r = <String, int>{};
+    (j['reactions'] as Map?)?.forEach((k, v) => r[k.toString()] = (v as num).toInt());
+    return Post(
+      id: d.id,
+      text: j['text'] ?? '',
+      image: j['image'],
+      created: j['created'] ?? 0,
+      shares: j['shares'] ?? 0,
+      commentCount: j['commentCount'] ?? 0,
+      reactions: r,
+    );
+  }
+}
+
 class Comment {
-  final String id, authorId, authorName, text, time;
-  int likes;
-  bool liked;
+  final String id, authorId, authorName, text;
+  final int created, likes;
   Comment({
     required this.id,
     required this.authorId,
     required this.authorName,
     required this.text,
-    required this.time,
-    this.likes = 0,
-    this.liked = false,
+    required this.created,
+    required this.likes,
   });
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'authorId': authorId,
-        'authorName': authorName,
-        'text': text,
-        'time': time,
-        'likes': likes,
-        'liked': liked,
-      };
-  factory Comment.fromJson(Map<String, dynamic> j) => Comment(
-        id: j['id'],
-        authorId: j['authorId'],
-        authorName: j['authorName'],
-        text: j['text'],
-        time: j['time'],
-        likes: j['likes'] ?? 0,
-        liked: j['liked'] ?? false,
-      );
+  factory Comment.fromDoc(QueryDocumentSnapshot<Map<String, dynamic>> d) {
+    final j = d.data();
+    return Comment(
+      id: d.id,
+      authorId: j['authorId'] ?? 'me',
+      authorName: j['authorName'] ?? 'Guest',
+      text: j['text'] ?? '',
+      created: j['created'] ?? 0,
+      likes: j['likes'] ?? 0,
+    );
+  }
 }
 
-class Post {
-  final String id, time;
-  String text;
-  String? image;
-  Map<String, int> reactions;
-  String? myReaction;
-  List<Comment> comments;
-  int shares;
-  Post({
-    required this.id,
-    required this.time,
-    this.text = '',
-    this.image,
-    Map<String, int>? reactions,
-    this.myReaction,
-    List<Comment>? comments,
-    this.shares = 0,
-  })  : reactions = reactions ?? {},
-        comments = comments ?? [];
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'time': time,
-        'text': text,
-        'image': image,
-        'reactions': reactions,
-        'myReaction': myReaction,
-        'comments': comments.map((c) => c.toJson()).toList(),
-        'shares': shares,
-      };
-  factory Post.fromJson(Map<String, dynamic> j) => Post(
-        id: j['id'],
-        time: j['time'],
-        text: j['text'] ?? '',
-        image: j['image'],
-        reactions: Map<String, int>.from(j['reactions'] ?? {}),
-        myReaction: j['myReaction'],
-        comments: ((j['comments'] ?? []) as List)
-            .map((e) => Comment.fromJson(Map<String, dynamic>.from(e)))
-            .toList(),
-        shares: j['shares'] ?? 0,
-      );
-}
-
-class Profile {
-  final String id;
-  String name, subtitle, intro;
-  String? photo, cover;
-  List<String> followers;
-  List<Post> posts;
-  bool liked, following;
-  Profile({
-    required this.id,
-    required this.name,
-    this.subtitle = '',
-    this.intro = '',
-    this.photo,
-    this.cover,
-    List<String>? followers,
-    List<Post>? posts,
-    this.liked = true,
-    this.following = true,
-  })  : followers = followers ?? [],
-        posts = posts ?? [];
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'name': name,
-        'subtitle': subtitle,
-        'intro': intro,
-        'photo': photo,
-        'cover': cover,
-        'followers': followers,
-        'posts': posts.map((p) => p.toJson()).toList(),
-        'liked': liked,
-        'following': following,
-      };
-  factory Profile.fromJson(Map<String, dynamic> j) => Profile(
-        id: j['id'],
-        name: j['name'],
-        subtitle: j['subtitle'] ?? '',
-        intro: j['intro'] ?? '',
-        photo: j['photo'],
-        cover: j['cover'],
-        followers: List<String>.from(j['followers'] ?? []),
-        posts: ((j['posts'] ?? []) as List)
-            .map((e) => Post.fromJson(Map<String, dynamic>.from(e)))
-            .toList(),
-        liked: j['liked'] ?? true,
-        following: j['following'] ?? true,
-      );
-}
-
-// ───────────────────────── store (saved in the browser) ─────────────────────────
+// ───────────────────────── live data ─────────────────────────
 
 class Store extends ChangeNotifier {
   List<Profile> profiles = [];
+  bool ready = false;
+  String? error;
+
+  void start() {
+    profilesCol.orderBy('created').snapshots().listen((s) {
+      profiles = s.docs.map(Profile.fromDoc).toList();
+      ready = true;
+      error = null;
+      notifyListeners();
+    }, onError: (e) {
+      error = e.toString();
+      ready = true;
+      notifyListeners();
+    });
+  }
 
   Profile? byId(String id) {
     for (final p in profiles) {
@@ -218,45 +221,88 @@ class Store extends ChangeNotifier {
     }
     return null;
   }
+}
+
+final store = Store();
+
+// What this device has reacted to (kept on this phone only).
+class Local extends ChangeNotifier {
+  Map<String, String> reacts = {};
+  Set<String> likedComments = {};
 
   Future<void> load() async {
     try {
       final sp = await SharedPreferences.getInstance();
-      final s = sp.getString('data');
-      if (s != null) {
-        profiles = (jsonDecode(s) as List)
-            .map((e) => Profile.fromJson(Map<String, dynamic>.from(e)))
-            .toList();
-      }
-    } catch (e) {
-      debugPrint('load failed: $e');
-    }
+      reacts = Map<String, String>.from(jsonDecode(sp.getString('reacts') ?? '{}'));
+      likedComments = (sp.getStringList('cl') ?? []).toSet();
+    } catch (_) {}
     notifyListeners();
-  }
-
-  void change() {
-    notifyListeners();
-    _save();
   }
 
   Future<void> _save() async {
     try {
       final sp = await SharedPreferences.getInstance();
-      await sp.setString(
-          'data', jsonEncode(profiles.map((p) => p.toJson()).toList()));
-    } catch (e) {
-      debugPrint('save failed: $e');
+      await sp.setString('reacts', jsonEncode(reacts));
+      await sp.setStringList('cl', likedComments.toList());
+    } catch (_) {}
+  }
+
+  void setReact(String postId, String? r) {
+    if (r == null) {
+      reacts.remove(postId);
+    } else {
+      reacts[postId] = r;
     }
+    notifyListeners();
+    _save();
+  }
+
+  void toggleCommentLike(String id) {
+    if (!likedComments.remove(id)) likedComments.add(id);
+    notifyListeners();
+    _save();
   }
 }
 
-final store = Store();
+final local = Local();
+
+Future<void> deleteProfile(Profile p) async {
+  final posts = await profilesCol.doc(p.id).collection('posts').get();
+  for (final d in posts.docs) {
+    final cs = await d.reference.collection('comments').get();
+    for (final c in cs.docs) {
+      await c.reference.delete();
+    }
+    await d.reference.delete();
+  }
+  final others =
+      await profilesCol.where('followers', arrayContains: p.id).get();
+  for (final o in others.docs) {
+    await o.reference.update({'followers': FieldValue.arrayRemove([p.id])});
+  }
+  await profilesCol.doc(p.id).delete();
+}
 
 // ───────────────────────── app ─────────────────────────
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await store.load();
+  if (firebaseOptions.apiKey.startsWith('PASTE')) {
+    runApp(const MaterialApp(
+        home: Scaffold(
+            body: Center(
+                child: Padding(
+      padding: EdgeInsets.all(24),
+      child: Text(
+          'Paste your Firebase web config into firebaseOptions at the top of lib/main.dart.',
+          textAlign: TextAlign.center,
+          style: TextStyle(fontSize: 18)),
+    )))));
+    return;
+  }
+  await Firebase.initializeApp(options: firebaseOptions);
+  await local.load();
+  store.start();
   runApp(const App());
 }
 
@@ -266,6 +312,7 @@ class App extends StatelessWidget {
   Widget build(BuildContext c) => MaterialApp(
         title: 'Saints profiles',
         debugShowCheckedModeBanner: false,
+        scaffoldMessengerKey: messengerKey,
         theme: ThemeData(
             useMaterial3: true,
             colorSchemeSeed: fbBlue,
@@ -274,10 +321,61 @@ class App extends StatelessWidget {
       );
 }
 
-// ───────────────────────── home (list of profiles) ─────────────────────────
+// ───────────────────────── home ─────────────────────────
 
 class Home extends StatelessWidget {
   const Home({super.key});
+
+  Widget body(BuildContext c) {
+    if (!store.ready) return const Center(child: CircularProgressIndicator());
+    if (store.error != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Text(
+              'Could not load profiles.\nCheck that Firestore is created and its rules allow access.\n\n${store.error}',
+              textAlign: TextAlign.center),
+        ),
+      );
+    }
+    if (store.profiles.isEmpty) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(32),
+          child: Text(
+            'No profiles yet.\nTap “Add profile” to create the first one.',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 16, color: Colors.black54),
+          ),
+        ),
+      );
+    }
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 600),
+        child: ListView(
+          padding: const EdgeInsets.only(bottom: 90),
+          children: [
+            for (final p in store.profiles)
+              Card(
+                color: Colors.white,
+                margin: const EdgeInsets.fromLTRB(12, 10, 12, 0),
+                child: ListTile(
+                  leading: Avatar(p.photo, 26),
+                  title: Text(p.name,
+                      textDirection: dirOf(p.name),
+                      style: const TextStyle(fontWeight: FontWeight.bold)),
+                  subtitle: Text('${p.followers.length} followers'),
+                  onTap: () => Navigator.push(c,
+                      MaterialPageRoute(builder: (_) => ProfileScreen(p.id))),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext c) => ListenableBuilder(
         listenable: store,
@@ -296,45 +394,7 @@ class Home extends StatelessWidget {
             icon: const Icon(Icons.add),
             label: const Text('Add profile'),
           ),
-          body: store.profiles.isEmpty
-              ? const Center(
-                  child: Padding(
-                    padding: EdgeInsets.all(32),
-                    child: Text(
-                      'No profiles yet.\nTap “Add profile” to create the first one.',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(fontSize: 16, color: Colors.black54),
-                    ),
-                  ),
-                )
-              : Center(
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 600),
-                    child: ListView(
-                      padding: const EdgeInsets.only(bottom: 90),
-                      children: [
-                        for (final p in store.profiles)
-                          Card(
-                            color: Colors.white,
-                            margin: const EdgeInsets.fromLTRB(12, 10, 12, 0),
-                            child: ListTile(
-                              leading: Avatar(p.photo, 26),
-                              title: Text(p.name,
-                                  textDirection: dirOf(p.name),
-                                  style: const TextStyle(
-                                      fontWeight: FontWeight.bold)),
-                              subtitle: Text(
-                                  '${p.followers.length} followers · ${p.posts.length} posts'),
-                              onTap: () => Navigator.push(
-                                  c,
-                                  MaterialPageRoute(
-                                      builder: (_) => ProfileScreen(p.id))),
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                ),
+          body: body(c),
         ),
       );
 }
@@ -357,24 +417,25 @@ class _ProfileFormState extends State<ProfileForm> {
 
   void save() {
     if (name.text.trim().isEmpty) return;
+    final data = {
+      'name': name.text.trim(),
+      'subtitle': sub.text.trim(),
+      'intro': intro.text.trim(),
+      'photo': photo,
+      'cover': cover,
+    };
     final e = widget.existing;
     if (e == null) {
-      store.profiles.add(Profile(
-        id: uid(),
-        name: name.text.trim(),
-        subtitle: sub.text.trim(),
-        intro: intro.text.trim(),
-        photo: photo,
-        cover: cover,
-      ));
+      profilesCol.doc().set({
+        ...data,
+        'followers': <String>[],
+        'liked': true,
+        'following': true,
+        'created': nowMs(),
+      });
     } else {
-      e.name = name.text.trim();
-      e.subtitle = sub.text.trim();
-      e.intro = intro.text.trim();
-      e.photo = photo;
-      e.cover = cover;
+      profilesCol.doc(e.id).update(data);
     }
-    store.change();
     Navigator.pop(context);
   }
 
@@ -391,7 +452,7 @@ class _ProfileFormState extends State<ProfileForm> {
               Center(
                 child: GestureDetector(
                   onTap: () async {
-                    final b = await pickImage(maxWidth: 500);
+                    final b = await pickImage(maxWidth: 400);
                     if (b != null) setState(() => photo = b);
                   },
                   child: Stack(children: [
@@ -413,7 +474,7 @@ class _ProfileFormState extends State<ProfileForm> {
               const SizedBox(height: 16),
               OutlinedButton.icon(
                 onPressed: () async {
-                  final b = await pickImage(maxWidth: 1000);
+                  final b = await pickImage(maxWidth: 900);
                   if (b != null) setState(() => cover = b);
                 },
                 icon: const Icon(Icons.image_outlined),
@@ -455,6 +516,39 @@ class _ProfileFormState extends State<ProfileForm> {
       );
 }
 
+// ───────────────────────── posts stream helper ─────────────────────────
+
+class PostsBuilder extends StatefulWidget {
+  final String profileId;
+  final Widget Function(BuildContext, List<Post>) builder;
+  const PostsBuilder({super.key, required this.profileId, required this.builder});
+  @override
+  State<PostsBuilder> createState() => _PostsBuilderState();
+}
+
+class _PostsBuilderState extends State<PostsBuilder> {
+  late final Stream<QuerySnapshot<Map<String, dynamic>>> stream = profilesCol
+      .doc(widget.profileId)
+      .collection('posts')
+      .orderBy('created', descending: true)
+      .snapshots();
+
+  @override
+  Widget build(BuildContext c) =>
+      StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+        stream: stream,
+        builder: (c, s) {
+          if (s.hasError) return box(Text('Could not load posts.\n${s.error}'));
+          if (!s.hasData) {
+            return const Padding(
+                padding: EdgeInsets.all(24),
+                child: Center(child: CircularProgressIndicator()));
+          }
+          return widget.builder(c, s.data!.docs.map(Post.fromDoc).toList());
+        },
+      );
+}
+
 // ───────────────────────── profile page ─────────────────────────
 
 class ProfileScreen extends StatefulWidget {
@@ -467,12 +561,21 @@ class ProfileScreen extends StatefulWidget {
 class _ProfileScreenState extends State<ProfileScreen> {
   int tab = 0;
 
+  DocumentReference<Map<String, dynamic>> get ref => profilesCol.doc(widget.id);
+
   @override
   Widget build(BuildContext context) => ListenableBuilder(
         listenable: store,
         builder: (c, _) {
           final p = store.byId(widget.id);
-          if (p == null) return const Scaffold();
+          if (p == null) {
+            return Scaffold(
+                appBar: AppBar(),
+                body: Center(
+                    child: store.ready
+                        ? const Text('Profile not found')
+                        : const CircularProgressIndicator()));
+          }
           return Scaffold(
             appBar: AppBar(
               backgroundColor: fbBlue,
@@ -488,12 +591,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                               builder: (_) => ProfileForm(existing: p)));
                     } else if (v == 'del') {
                       if (await confirm(c, 'Delete this profile and all its posts?')) {
-                        for (final o in store.profiles) {
-                          o.followers.remove(p.id);
-                        }
-                        store.profiles.remove(p);
-                        store.change();
                         if (c.mounted) Navigator.pop(c);
+                        deleteProfile(p);
                       }
                     }
                   },
@@ -509,7 +608,18 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 constraints: const BoxConstraints(maxWidth: 600),
                 child: ListView(padding: const EdgeInsets.only(bottom: 40), children: [
                   header(p),
-                  if (tab == 0) ...postsTab(p),
+                  if (tab == 0) ...[
+                    introCard(p),
+                    followersCard(p),
+                    composerCard(p),
+                    PostsBuilder(
+                      profileId: p.id,
+                      builder: (c, posts) => Column(children: [
+                        for (final post in posts)
+                          PostCard(key: ValueKey(post.id), profile: p, post: post),
+                      ]),
+                    ),
+                  ],
                   if (tab == 1) aboutTab(p),
                   if (tab == 2) photosTab(p),
                 ]),
@@ -550,15 +660,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
               height: 200,
               child: GestureDetector(
                 onTap: () async {
-                  final b = await pickImage(maxWidth: 1000);
-                  if (b != null) {
-                    p.cover = b;
-                    store.change();
-                  }
+                  final b = await pickImage(maxWidth: 900);
+                  if (b != null) ref.update({'cover': b});
                 },
                 child: Container(
                   color: chipGrey,
-                  child: p.cover != null
+                  child: img(p.cover) != null
                       ? Image(image: img(p.cover)!, fit: BoxFit.cover)
                       : const Center(
                           child: Icon(Icons.add_a_photo_outlined,
@@ -573,11 +680,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
               child: Center(
                 child: GestureDetector(
                   onTap: () async {
-                    final b = await pickImage(maxWidth: 500);
-                    if (b != null) {
-                      p.photo = b;
-                      store.change();
-                    }
+                    final b = await pickImage(maxWidth: 400);
+                    if (b != null) ref.update({'photo': b});
                   },
                   child: CircleAvatar(
                       radius: 66,
@@ -609,16 +713,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
         Padding(
           padding: const EdgeInsets.all(16),
           child: Row(children: [
-            btn(p.liked ? 'Liked' : 'Like', Icons.thumb_up, p.liked, () {
-              p.liked = !p.liked;
-              store.change();
-            }),
+            btn(p.liked ? 'Liked' : 'Like', Icons.thumb_up, p.liked,
+                () => ref.update({'liked': !p.liked})),
             const SizedBox(width: 12),
             btn(p.following ? 'Unfollow' : 'Follow',
-                p.following ? Icons.check : Icons.add, !p.following, () {
-              p.following = !p.following;
-              store.change();
-            }),
+                p.following ? Icons.check : Icons.add, !p.following,
+                () => ref.update({'following': !p.following})),
           ]),
         ),
         const Divider(height: 1),
@@ -645,16 +745,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
       ]),
     );
   }
-
-  // ── Posts tab ──
-
-  List<Widget> postsTab(Profile p) => [
-        introCard(p),
-        followersCard(p),
-        composerCard(p),
-        for (final post in p.posts)
-          PostCard(key: ValueKey(post.id), profile: p, post: post),
-      ];
 
   Widget introCard(Profile p) {
     final lines = p.intro.split('\n').where((l) => l.trim().isNotEmpty).toList();
@@ -700,8 +790,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     MaterialPageRoute(builder: (_) => ProfileScreen(f.id))),
                 onLongPress: () async {
                   if (await confirm(context, 'Remove ${f.name} from followers?')) {
-                    p.followers.remove(f.id);
-                    store.change();
+                    ref.update({'followers': FieldValue.arrayRemove([f.id])});
                   }
                 },
                 child: Column(children: [
@@ -737,8 +826,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
         .where((o) => o.id != p.id && !p.followers.contains(o.id))
         .toList();
     if (cands.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Create more profiles from the home screen first.')));
+      toast('Create more profiles from the home screen first.');
       return;
     }
     showModalBottomSheet(
@@ -749,8 +837,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
             leading: Avatar(o.photo, 22),
             title: Text(o.name, textDirection: dirOf(o.name)),
             onTap: () {
-              p.followers.add(o.id);
-              store.change();
+              ref.update({'followers': FieldValue.arrayUnion([o.id])});
               Navigator.pop(s);
             },
           ),
@@ -779,8 +866,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
           ),
         ),
       ]));
-
-  // ── About tab ──
 
   Widget aboutTab(Profile p) =>
       box(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -815,33 +900,34 @@ class _ProfileScreenState extends State<ProfileScreen> {
         ),
       ]));
 
-  // ── Photos tab ──
-
-  Widget photosTab(Profile p) {
-    final all = <String>[
-      if (p.photo != null) p.photo!,
-      if (p.cover != null) p.cover!,
-      for (final post in p.posts)
-        if (post.image != null) post.image!,
-    ];
-    return box(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      const Text('Photos',
-          style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-      const SizedBox(height: 12),
-      if (all.isEmpty)
-        const Text('No photos yet.', style: TextStyle(color: Colors.black54)),
-      GridView.count(
-        crossAxisCount: 3,
-        mainAxisSpacing: 4,
-        crossAxisSpacing: 4,
-        shrinkWrap: true,
-        physics: const NeverScrollableScrollPhysics(),
-        children: [
-          for (final b in all) Image(image: img(b)!, fit: BoxFit.cover),
-        ],
-      ),
-    ]));
-  }
+  Widget photosTab(Profile p) => PostsBuilder(
+        profileId: p.id,
+        builder: (c, posts) {
+          final all = <String>[
+            if (p.photo != null && p.photo!.isNotEmpty) p.photo!,
+            if (p.cover != null && p.cover!.isNotEmpty) p.cover!,
+            for (final post in posts)
+              if (post.image != null && post.image!.isNotEmpty) post.image!,
+          ];
+          return box(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text('Photos',
+                style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 12),
+            if (all.isEmpty)
+              const Text('No photos yet.', style: TextStyle(color: Colors.black54)),
+            GridView.count(
+              crossAxisCount: 3,
+              mainAxisSpacing: 4,
+              crossAxisSpacing: 4,
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              children: [
+                for (final b in all) Image(image: img(b)!, fit: BoxFit.cover),
+              ],
+            ),
+          ]));
+        },
+      );
 }
 
 // ───────────────────────── create post sheet ─────────────────────────
@@ -859,15 +945,14 @@ class _ComposerState extends State<_Composer> {
 
   void post() {
     if (t.text.trim().isEmpty && image == null) return;
-    widget.p.posts.insert(
-        0,
-        Post(
-          id: uid(),
-          time: DateTime.now().toIso8601String(),
-          text: t.text.trim(),
-          image: image,
-        ));
-    store.change();
+    profilesCol.doc(widget.p.id).collection('posts').add({
+      'text': t.text.trim(),
+      'image': image,
+      'created': nowMs(),
+      'reactions': <String, int>{},
+      'shares': 0,
+      'commentCount': 0,
+    });
     Navigator.pop(context);
   }
 
@@ -939,15 +1024,20 @@ class _PostCardState extends State<PostCard> {
 
   Post get post => widget.post;
 
+  DocumentReference<Map<String, dynamic>> get ref =>
+      profilesCol.doc(widget.profile.id).collection('posts').doc(post.id);
+
+  late final Stream<QuerySnapshot<Map<String, dynamic>>> commentsStream =
+      ref.collection('comments').orderBy('created').snapshots();
+
   void react(String? r) {
-    final old = post.myReaction;
-    if (old != null) {
-      post.reactions[old] = (post.reactions[old] ?? 1) - 1;
-      if (post.reactions[old]! <= 0) post.reactions.remove(old);
-    }
-    if (r != null) post.reactions[r] = (post.reactions[r] ?? 0) + 1;
-    post.myReaction = r;
-    store.change();
+    final old = local.reacts[post.id];
+    if (r == old) r = null;
+    final up = <String, dynamic>{};
+    if (old != null) up['reactions.$old'] = FieldValue.increment(-1);
+    if (r != null) up['reactions.$r'] = FieldValue.increment(1);
+    if (up.isNotEmpty) ref.update(up);
+    local.setReact(post.id, r);
   }
 
   void pickReaction() => showDialog(
@@ -974,29 +1064,34 @@ class _PostCardState extends State<PostCard> {
     final t = ctl.text.trim();
     if (t.isEmpty) return;
     final who = as == 'me' ? null : store.byId(as);
-    post.comments.add(Comment(
-      id: uid(),
-      authorId: who?.id ?? 'me',
-      authorName: who?.name ?? 'You',
-      text: t,
-      time: DateTime.now().toIso8601String(),
-    ));
+    ref.collection('comments').add({
+      'authorId': who?.id ?? 'me',
+      'authorName': who?.name ?? 'Guest',
+      'text': t,
+      'created': nowMs(),
+      'likes': 0,
+    });
+    ref.update({'commentCount': FieldValue.increment(1)});
     ctl.clear();
-    store.change();
+    setState(() {});
   }
 
   @override
-  Widget build(BuildContext context) {
-    final p = widget.profile;
-    final total = post.reactions.values.fold(0, (a, b) => a + b);
-    final top = (post.reactions.entries.toList()
-          ..sort((a, b) => b.value.compareTo(a.value)))
-        .take(3)
-        .map((e) => emojis[e.key])
-        .join();
-    final mine = post.myReaction;
+  Widget build(BuildContext context) => ListenableBuilder(
+        listenable: local,
+        builder: (c, _) => content(c),
+      );
 
-    Widget action(Widget icon, String label, VoidCallback f, {VoidCallback? long, Color? color}) =>
+  Widget content(BuildContext context) {
+    final p = widget.profile;
+    final counts = post.reactions.entries.where((e) => e.value > 0).toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    final total = counts.fold(0, (a, e) => a + e.value);
+    final top = counts.take(3).map((e) => emojis[e.key] ?? '').join();
+    final mine = local.reacts[post.id];
+
+    Widget action(Widget icon, String label, VoidCallback f,
+            {VoidCallback? long, Color? color}) =>
         Expanded(
           child: InkWell(
             onTap: f,
@@ -1024,15 +1119,18 @@ class _PostCardState extends State<PostCard> {
             Text(p.name,
                 textDirection: dirOf(p.name),
                 style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-            Text(ago(post.time),
+            Text(ago(post.created),
                 style: const TextStyle(color: Colors.black54, fontSize: 12)),
           ]),
         ),
         PopupMenuButton<String>(
           onSelected: (v) async {
             if (v == 'del' && await confirm(context, 'Delete this post?')) {
-              p.posts.remove(post);
-              store.change();
+              final cs = await ref.collection('comments').get();
+              for (final d in cs.docs) {
+                await d.reference.delete();
+              }
+              await ref.delete();
             }
           },
           itemBuilder: (_) =>
@@ -1049,7 +1147,7 @@ class _PostCardState extends State<PostCard> {
                 style: const TextStyle(fontSize: 17, height: 1.4)),
           ),
         ),
-      if (post.image != null)
+      if (img(post.image) != null)
         Padding(
           padding: const EdgeInsets.only(top: 10),
           child: ClipRRect(
@@ -1065,7 +1163,7 @@ class _PostCardState extends State<PostCard> {
         child: Row(children: [
           if (total > 0) Text('$top $total', style: const TextStyle(fontSize: 14)),
           const Spacer(),
-          Text('${post.comments.length} comments · ${post.shares} shares',
+          Text('${post.commentCount} comments · ${post.shares} shares',
               style: const TextStyle(color: Colors.black54, fontSize: 13)),
         ]),
       ),
@@ -1074,7 +1172,7 @@ class _PostCardState extends State<PostCard> {
         action(
           mine == null
               ? const Icon(Icons.thumb_up_outlined, size: 20, color: Colors.black54)
-              : Text(emojis[mine]!, style: const TextStyle(fontSize: 18)),
+              : Text(emojis[mine] ?? '👍', style: const TextStyle(fontSize: 18)),
           mine ?? 'Like',
           () => react(mine == null ? 'Like' : null),
           long: pickReaction,
@@ -1084,15 +1182,24 @@ class _PostCardState extends State<PostCard> {
             'Comment', () => setState(() => open = !open)),
         action(const Icon(Icons.share_outlined, size: 20, color: Colors.black54), 'Share',
             () {
-          post.shares++;
-          store.change();
-          ScaffoldMessenger.of(context)
-              .showSnackBar(const SnackBar(content: Text('Shared')));
+          ref.update({'shares': FieldValue.increment(1)});
+          toast('Shared');
         }),
       ]),
       if (open) ...[
         const Divider(height: 14),
-        for (final cm in post.comments) commentTile(cm),
+        StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+          stream: commentsStream,
+          builder: (c, s) {
+            if (!s.hasData) {
+              return const Padding(
+                  padding: EdgeInsets.all(8),
+                  child: Center(child: CircularProgressIndicator()));
+            }
+            final cms = s.data!.docs.map(Comment.fromDoc).toList();
+            return Column(children: [for (final cm in cms) commentTile(cm)]);
+          },
+        ),
         const SizedBox(height: 10),
         commentInput(),
       ],
@@ -1102,6 +1209,7 @@ class _PostCardState extends State<PostCard> {
   Widget commentTile(Comment cm) {
     final a = cm.authorId == 'me' ? null : store.byId(cm.authorId);
     final name = a?.name ?? cm.authorName;
+    final liked = local.likedComments.contains(cm.id);
     return Padding(
       padding: const EdgeInsets.only(top: 10),
       child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -1112,8 +1220,8 @@ class _PostCardState extends State<PostCard> {
             GestureDetector(
               onLongPress: () async {
                 if (await confirm(context, 'Delete this comment?')) {
-                  post.comments.remove(cm);
-                  store.change();
+                  ref.collection('comments').doc(cm.id).delete();
+                  ref.update({'commentCount': FieldValue.increment(-1)});
                 }
               },
               child: Container(
@@ -1136,20 +1244,20 @@ class _PostCardState extends State<PostCard> {
             Padding(
               padding: const EdgeInsets.only(left: 12, top: 2),
               child: Row(children: [
-                Text(ago(cm.time),
+                Text(ago(cm.created),
                     style: const TextStyle(color: Colors.black54, fontSize: 12)),
                 const SizedBox(width: 14),
                 InkWell(
                   onTap: () {
-                    cm.liked = !cm.liked;
-                    cm.likes += cm.liked ? 1 : -1;
-                    store.change();
+                    ref.collection('comments').doc(cm.id).update(
+                        {'likes': FieldValue.increment(liked ? -1 : 1)});
+                    local.toggleCommentLike(cm.id);
                   },
                   child: Text('Like',
                       style: TextStyle(
                           fontSize: 12,
                           fontWeight: FontWeight.bold,
-                          color: cm.liked ? fbBlue : Colors.black54)),
+                          color: liked ? fbBlue : Colors.black54)),
                 ),
                 if (cm.likes > 0)
                   Text('  👍 ${cm.likes}', style: const TextStyle(fontSize: 12)),
@@ -1170,7 +1278,7 @@ class _PostCardState extends State<PostCard> {
         itemBuilder: (_) => [
           const PopupMenuItem(
               value: 'me',
-              child: Row(children: [Avatar(null, 14), SizedBox(width: 8), Text('You')])),
+              child: Row(children: [Avatar(null, 14), SizedBox(width: 8), Text('Guest')])),
           for (final q in store.profiles)
             PopupMenuItem(
               value: q.id,
